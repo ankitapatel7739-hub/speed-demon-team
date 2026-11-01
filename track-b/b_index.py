@@ -18,6 +18,8 @@ import argparse
 import os
 import re
 import sys
+import heapq
+from functools import lru_cache
 
 DOCS_FILE = "docs.txt"
 QUERIES_FILE = "queries.txt"
@@ -90,33 +92,51 @@ def run_bool(index: dict[bytes, set[int]], words: list[bytes]):
     return result
 
 
-def run_phrase(index: dict[bytes, set[int]], texts: list[bytes], terms: list[bytes]) -> list[int]:
-    candidates = index.get(terms[0], EMPTY)
-
-    for term in terms[1:]:
-        candidates = candidates & index.get(term, EMPTY)
-        if not candidates:
-            return []
-
-    pattern = re.compile(
+@lru_cache(maxsize=32768)
+def compile_phrase_pattern(terms: tuple[bytes, ...]):
+    pattern = (
         rb"(?<![a-z0-9])"
         + rb"[^a-z0-9]+".join(re.escape(term) for term in terms)
         + rb"(?![a-z0-9])"
     )
-
-    matches = []
-
-    for doc_id in candidates:
-        if pattern.search(texts[doc_id].lower()):
-            matches.append(doc_id)
-
-    return matches
+    return re.compile(pattern)
 
 
-def format_result(doc_ids) -> str:
-    """count, sum of ids, then the (up to) 10 smallest ids ascending."""
-    ids = sorted(doc_ids)
-    return " ".join(str(x) for x in [len(ids), sum(ids)] + ids[:10])
+def run_phrase(index, texts, terms):
+    # Start with the rarest term to reduce candidate documents.
+    ordered_terms = sorted(
+        terms,
+        key=lambda term: len(index.get(term, EMPTY))
+    )
+
+    candidates = index.get(ordered_terms[0], EMPTY)
+
+    for term in ordered_terms[1:]:
+        candidates = candidates & index.get(term, EMPTY)
+        if not candidates:
+            return []
+
+    pattern = compile_phrase_pattern(tuple(terms))
+
+    return [
+        doc_id
+        for doc_id in candidates
+        if pattern.search(texts[doc_id].lower())
+    ]
+
+
+def format_result(doc_ids):
+    count = len(doc_ids)
+    total = sum(doc_ids)
+
+    if count <= 100:
+        smallest = sorted(doc_ids)
+    else:
+        smallest = heapq.nsmallest(10, doc_ids)
+
+    return " ".join(
+        str(x) for x in [count, total] + smallest[:10]
+    )
 
 
 def answer(index, texts, line: bytes) -> str:
