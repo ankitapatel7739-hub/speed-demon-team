@@ -7,11 +7,6 @@ INPUT_NAME = "requests.log"
 OUTPUT_NAME = "summary.txt"
 
 
-def percentile(sorted_values, p):
-    n = len(sorted_values)
-    return sorted_values[(p * n + 99) // 100 - 1]
-
-
 def main(data_dir="/data", out_dir="/out"):
     groups = {}
 
@@ -19,19 +14,19 @@ def main(data_dir="/data", out_dir="/out"):
 
     with open(input_path, "r", encoding="ascii", buffering=1024 * 1024) as f:
         for line in f:
-            # Fixed timestamp format:
-            # YYYY-MM-DDTHH:MM:SS.ffffffZ
             hour = line[:13]
 
             parts = line.split()
+
             endpoint = parts[2]
             status = parts[3]
             latency = int(parts[4])
 
             key = (hour, endpoint)
 
-            group = groups.get(key)
-            if group is None:
+            try:
+                group = groups[key]
+            except KeyError:
                 group = [[], 0]
                 groups[key] = group
 
@@ -42,14 +37,16 @@ def main(data_dir="/data", out_dir="/out"):
 
     lines = []
 
-    for (hour, endpoint), (values, errors) in sorted(groups.items()):
-        values.sort()
+    for (hour, endpoint), group in sorted(groups.items()):
+        values = group[0]
+        errors = group[1]
 
+        values.sort()
         count = len(values)
 
-        p50 = values[(50 * count + 99) // 100 - 1]
-        p95 = values[(95 * count + 99) // 100 - 1]
-        p99 = values[(99 * count + 99) // 100 - 1]
+        p50 = values[(count * 50 + 99) // 100 - 1]
+        p95 = values[(count * 95 + 99) // 100 - 1]
+        p99 = values[(count * 99 + 99) // 100 - 1]
 
         ppm = errors * 1_000_000 // count
 
