@@ -30,7 +30,7 @@ AMOUNT = re.compile(r"(-?)([0-9]+)\.([0-9]{2})")   # also take "+5", " 5", "1_0"
 
 def parse_int(text):
     """'42' -> 42, for id and region_id."""
-    if DIGITS.fullmatch(text) is None:
+    if not text or not text.isascii() or not text.isdigit():
         raise ValueError(f"bad integer {text!r}")
     return int(text)
 
@@ -38,12 +38,14 @@ def parse_int(text):
 def parse_cents(text):
     """'-5.25' -> -525. Exact integer cents, never a float."""
     match = AMOUNT.fullmatch(text)
+
     if match is None:
         raise ValueError(f"bad amount {text!r}")
+
     sign, whole, frac = match.groups()
     cents = int(whole) * 100 + int(frac)
-    return -cents if sign else cents
 
+    return -cents if sign else cents
 
 def format_cents(cents):
     """-525 -> '-5.25', -5 -> '-0.05', 0 -> '0.00'."""
