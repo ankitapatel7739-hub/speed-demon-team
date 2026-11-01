@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
-"""Speed Demon 2026, Track D (Traverse): the naive reference.
-
-    python3.13 reference/d_traverse.py [--data /data] [--out /out]
-
-Reads graph.txt and queries.txt from the data directory and writes distances.txt
-to the output directory: for each query, in input order, the length of the
-shortest directed path from s to t, or -1 if t cannot be reached from s.
-specs/d-traverse.md is the contract; this file is one correct way to meet it.
-
-The approach is the textbook one: load the edges into an adjacency list of
-(head, weight) pairs, then run a fresh Dijkstra search with a binary heap for
-every query, stopping as soon as the target is settled.
-"""
+"""Speed Demon 2026 - Track D: Traverse."""
 
 import argparse
 import heapq
@@ -19,55 +7,84 @@ import os
 
 
 def read_graph(path):
-    """Adjacency list: adj[u] is a list of (v, w) for every edge line "u v w"."""
-    with open(path, encoding="ascii") as f:
+    with open(path, "r", encoding="ascii") as f:
         n, m = map(int, f.readline().split())
         adj = [[] for _ in range(n)]
+
         for line in f:
-            u, v, w = line.split()
-            adj[int(u)].append((int(v), int(w)))
+            u, v, w = map(int, line.split())
+            adj[u].append((v, w))
+
     return adj
 
 
 def read_queries(path):
-    with open(path, encoding="ascii") as f:
+    with open(path, "r", encoding="ascii") as f:
         return [tuple(map(int, line.split())) for line in f]
 
 
-def shortest_path(adj, s, t):
-    """Dijkstra from s, stopping when t is settled; -1 if t is never reached.
+def dijkstra(adj, source):
+    n = len(adj)
+    dist = [-1] * n
+    dist[source] = 0
 
-    Parallel edges need no special handling: each one is relaxed, and only the
-    lightest can improve a distance. Weight-0 edges are fine because Dijkstra only
-    needs weights to be non-negative.
-    """
-    dist = {s: 0}
-    heap = [(0, s)]
+    heap = [(0, source)]
+
     while heap:
         d, u = heapq.heappop(heap)
-        if d > dist[u]:
-            continue  # stale entry: u was already settled at a shorter distance
-        if u == t:
-            return d
+
+        if d != dist[u]:
+            continue
+
         for v, w in adj[u]:
             nd = d + w
-            if v not in dist or nd < dist[v]:
+
+            if dist[v] == -1 or nd < dist[v]:
                 dist[v] = nd
                 heapq.heappush(heap, (nd, v))
-    return -1
+
+    return dist
 
 
 def main(data_dir, out_dir):
     adj = read_graph(os.path.join(data_dir, "graph.txt"))
     queries = read_queries(os.path.join(data_dir, "queries.txt"))
-    answers = [shortest_path(adj, s, t) for s, t in queries]
-    with open(os.path.join(out_dir, "distances.txt"), "w", encoding="ascii", newline="\n") as f:
-        f.write("".join(f"{d}\n" for d in answers))
+
+    # Group queries by source
+    grouped = {}
+
+    for index, (s, t) in enumerate(queries):
+        if s not in grouped:
+            grouped[s] = []
+
+        grouped[s].append((index, t))
+
+    answers = [-1] * len(queries)
+
+    # Run Dijkstra once for each unique source
+    for source, items in grouped.items():
+        dist = dijkstra(adj, source)
+
+        for index, target in items:
+            answers[index] = dist[target]
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    with open(
+        os.path.join(out_dir, "distances.txt"),
+        "w",
+        encoding="ascii",
+        newline="\n",
+    ) as f:
+        f.write("\n".join(map(str, answers)))
+        if answers:
+            f.write("\n")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Track D (Traverse) naive reference")
+    parser = argparse.ArgumentParser()
     parser.add_argument("--data", default="/data")
     parser.add_argument("--out", default="/out")
+
     args = parser.parse_args()
     main(args.data, args.out)
