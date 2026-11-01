@@ -6,126 +6,126 @@ import heapq
 import os
 
 
-def read_graph(path):
-    with open(path, "r", encoding="ascii", buffering=1024 * 1024) as f:
+def read_input(graph_path, queries_path):
+    with open(graph_path, "rb", buffering=1024 * 1024) as f:
         n, m = map(int, f.readline().split())
+
         adj = [[] for _ in range(n)]
+        rev = [[] for _ in range(n)]
 
         for line in f:
             u, v, w = map(int, line.split())
             adj[u].append((v, w))
+            rev[v].append((u, w))
 
-    return adj
+    with open(queries_path, "rb", buffering=1024 * 1024) as f:
+        queries = [tuple(map(int, line.split())) for line in f]
+
+    return adj, rev, queries
 
 
-def read_queries(path):
-    with open(path, "r", encoding="ascii", buffering=1024 * 1024) as f:
-        return [tuple(map(int, line.split())) for line in f]
-
-
-def dijkstra_targets(adj, source, targets):
+def dijkstra_targets(graph, start, targets):
     """
-    Run Dijkstra from source and stop when every required target
-    has been settled.
+    Dijkstra that stops as soon as every required target is settled.
     """
-
-    n = len(adj)
-    dist = [-1] * n
-    dist[source] = 0
-
-    heap = [(0, source)]
+    dist = {start: 0}
+    heap = [(0, start)]
 
     remaining = set(targets)
-    results = {}
-
-    # Handle source itself as a target
-    if source in remaining:
-        results[source] = 0
-        remaining.remove(source)
+    found = {}
 
     while heap and remaining:
         d, u = heapq.heappop(heap)
 
-        if d != dist[u]:
+        if dist.get(u) != d:
             continue
 
-        # We reached a required target
         if u in remaining:
-            results[u] = d
+            found[u] = d
             remaining.remove(u)
 
             if not remaining:
                 break
 
-        for v, w in adj[u]:
+        for v, w in graph[u]:
             nd = d + w
 
-            if dist[v] == -1 or nd < dist[v]:
+            old = dist.get(v)
+            if old is None or nd < old:
                 dist[v] = nd
                 heapq.heappush(heap, (nd, v))
 
-    return results
+    return found
 
 
 def main(data_dir, out_dir):
-    adj = read_graph(os.path.join(data_dir, "graph.txt"))
-    queries = read_queries(os.path.join(data_dir, "queries.txt"))
+    graph_path = os.path.join(data_dir, "graph.txt")
+    queries_path = os.path.join(data_dir, "queries.txt")
 
-    # Group queries by source
-    grouped = {}
-
-    for index, (source, target) in enumerate(queries):
-        if source not in grouped:
-            grouped[source] = []
-
-        grouped[source].append((index, target))
+    adj, rev, queries = read_input(graph_path, queries_path)
 
     answers = [-1] * len(queries)
 
-    # Run Dijkstra once per source,
-    # stopping after all required targets are found
-    for source, items in grouped.items():
+    # Count unique sources and targets
+    sources = {}
+    targets = {}
 
-        targets = {target for _, target in items}
+    for i, (s, t) in enumerate(queries):
+        sources.setdefault(s, []).append((i, t))
+        targets.setdefault(t, []).append((i, s))
 
-        results = dijkstra_targets(
-            adj,
-            source,
-            targets
-        )
+    # Choose the direction requiring fewer Dijkstra runs
+    if len(sources) <= len(targets):
 
-        for index, target in items:
-            answers[index] = results.get(target, -1)
+        # Forward search from each unique source
+        for source, items in sources.items():
+
+            needed = {target for _, target in items}
+
+            result = dijkstra_targets(
+                adj,
+                source,
+                needed
+            )
+
+            for index, target in items:
+                answers[index] = result.get(target, -1)
+
+    else:
+
+        # Reverse search from each unique target
+        # Distance target -> source in reversed graph
+        # equals source -> target in original graph
+        for target, items in targets.items():
+
+            needed = {source for _, source in items}
+
+            result = dijkstra_targets(
+                rev,
+                target,
+                needed
+            )
+
+            for index, source in items:
+                answers[index] = result.get(source, -1)
 
     os.makedirs(out_dir, exist_ok=True)
 
-    output_path = os.path.join(out_dir, "distances.txt")
-
     with open(
-        output_path,
+        os.path.join(out_dir, "distances.txt"),
         "w",
         encoding="ascii",
         newline="\n",
     ) as f:
         f.write("\n".join(map(str, answers)))
-
         if answers:
             f.write("\n")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-
-    parser.add_argument(
-        "--data",
-        default="/data"
-    )
-
-    parser.add_argument(
-        "--out",
-        default="/out"
-    )
+    parser.add_argument("--data", default="/data")
+    parser.add_argument("--out", default="/out")
 
     args = parser.parse_args()
-
     main(args.data, args.out)
