@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Speed Demon 2026 - Track D: Traverse."""
+"""Speed Demon 2026 - Track D: Traverse.
+
+Bidirectional Dijkstra for shortest directed paths.
+"""
 
 import argparse
 import heapq
@@ -21,111 +24,176 @@ def read_input(graph_path, queries_path):
     with open(queries_path, "rb", buffering=1024 * 1024) as f:
         queries = [tuple(map(int, line.split())) for line in f]
 
-    return adj, rev, queries
+    return n, adj, rev, queries
 
 
-def dijkstra_targets(graph, start, targets):
-    """
-    Dijkstra that stops as soon as every required target is settled.
-    """
-    dist = {start: 0}
-    heap = [(0, start)]
+def shortest_path_bidirectional(adj, rev, source, target):
+    """Bidirectional Dijkstra."""
 
-    remaining = set(targets)
-    found = {}
+    if source == target:
+        return 0
 
-    while heap and remaining:
-        d, u = heapq.heappop(heap)
+    # Distance from source
+    dist_f = {source: 0}
 
-        if dist.get(u) != d:
-            continue
+    # Distance backwards from target
+    dist_b = {target: 0}
 
-        if u in remaining:
-            found[u] = d
-            remaining.remove(u)
+    heap_f = [(0, source)]
+    heap_b = [(0, target)]
 
-            if not remaining:
-                break
+    best = None
 
-        for v, w in graph[u]:
-            nd = d + w
+    while heap_f and heap_b:
 
-            old = dist.get(v)
-            if old is None or nd < old:
-                dist[v] = nd
-                heapq.heappush(heap, (nd, v))
+        # Current lower bound
+        min_f = heap_f[0][0]
+        min_b = heap_b[0][0]
 
-    return found
+        # If no better path is possible
+        if best is not None and min_f + min_b >= best:
+            break
+
+        # Expand the smaller frontier
+        if min_f <= min_b:
+
+            d, u = heapq.heappop(heap_f)
+
+            if dist_f.get(u) != d:
+                continue
+
+            # Searches meet
+            other = dist_b.get(u)
+            if other is not None:
+                candidate = d + other
+
+                if best is None or candidate < best:
+                    best = candidate
+
+            for v, w in adj[u]:
+
+                nd = d + w
+                old = dist_f.get(v)
+
+                if old is None or nd < old:
+                    dist_f[v] = nd
+                    heapq.heappush(heap_f, (nd, v))
+
+                    other = dist_b.get(v)
+
+                    if other is not None:
+                        candidate = nd + other
+
+                        if best is None or candidate < best:
+                            best = candidate
+
+        else:
+
+            d, u = heapq.heappop(heap_b)
+
+            if dist_b.get(u) != d:
+                continue
+
+            # Searches meet
+            other = dist_f.get(u)
+
+            if other is not None:
+                candidate = d + other
+
+                if best is None or candidate < best:
+                    best = candidate
+
+            # Reverse graph traversal
+            for v, w in rev[u]:
+
+                nd = d + w
+                old = dist_b.get(v)
+
+                if old is None or nd < old:
+                    dist_b[v] = nd
+                    heapq.heappush(heap_b, (nd, v))
+
+                    other = dist_f.get(v)
+
+                    if other is not None:
+                        candidate = nd + other
+
+                        if best is None or candidate < best:
+                            best = candidate
+
+    return -1 if best is None else best
 
 
-def main(data_dir, out_dir):
+def main(data_dir="/data", out_dir="/out"):
+
     graph_path = os.path.join(data_dir, "graph.txt")
     queries_path = os.path.join(data_dir, "queries.txt")
 
-    adj, rev, queries = read_input(graph_path, queries_path)
+    n, adj, rev, queries = read_input(
+        graph_path,
+        queries_path
+    )
 
     answers = [-1] * len(queries)
 
-    # Count unique sources and targets
-    sources = {}
-    targets = {}
+    # Avoid calculating identical queries repeatedly
+    unique = {}
 
-    for i, (s, t) in enumerate(queries):
-        sources.setdefault(s, []).append((i, t))
-        targets.setdefault(t, []).append((i, s))
+    for index, (source, target) in enumerate(queries):
+        key = (source, target)
 
-    # Choose the direction requiring fewer Dijkstra runs
-    if len(sources) <= len(targets):
+        if key not in unique:
+            unique[key] = []
 
-        # Forward search from each unique source
-        for source, items in sources.items():
+        unique[key].append(index)
 
-            needed = {target for _, target in items}
+    # Solve each unique query once
+    for (source, target), indexes in unique.items():
 
-            result = dijkstra_targets(
-                adj,
-                source,
-                needed
-            )
+        distance = shortest_path_bidirectional(
+            adj,
+            rev,
+            source,
+            target
+        )
 
-            for index, target in items:
-                answers[index] = result.get(target, -1)
-
-    else:
-
-        # Reverse search from each unique target
-        # Distance target -> source in reversed graph
-        # equals source -> target in original graph
-        for target, items in targets.items():
-
-            needed = {source for _, source in items}
-
-            result = dijkstra_targets(
-                rev,
-                target,
-                needed
-            )
-
-            for index, source in items:
-                answers[index] = result.get(source, -1)
+        for index in indexes:
+            answers[index] = distance
 
     os.makedirs(out_dir, exist_ok=True)
 
+    output_path = os.path.join(
+        out_dir,
+        "distances.txt"
+    )
+
     with open(
-        os.path.join(out_dir, "distances.txt"),
+        output_path,
         "w",
         encoding="ascii",
-        newline="\n",
+        newline="\n"
     ) as f:
+
         f.write("\n".join(map(str, answers)))
+
         if answers:
             f.write("\n")
 
 
 if __name__ == "__main__":
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", default="/data")
-    parser.add_argument("--out", default="/out")
+
+    parser.add_argument(
+        "--data",
+        default="/data"
+    )
+
+    parser.add_argument(
+        "--out",
+        default="/out"
+    )
 
     args = parser.parse_args()
+
     main(args.data, args.out)
