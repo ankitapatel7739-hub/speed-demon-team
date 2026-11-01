@@ -12,73 +12,75 @@ def main(data_dir="/data", out_dir="/out"):
 
     input_path = os.path.join(data_dir, INPUT_NAME)
 
-    with open(
-        input_path,
-        "r",
-        encoding="ascii",
-        buffering=1024 * 1024
-    ) as f:
-
+    # Binary mode avoids decoding 3.1 million lines into Python strings.
+    with open(input_path, "rb", buffering=8 * 1024 * 1024) as f:
         for line in f:
-            parts = line.split()
+            # Split into exactly the five fields.
+            # Input format:
+            # timestamp method endpoint status latency\n
+            ts, method, endpoint, status, latency = line.split()
 
-            hour = parts[0][:13]
-            endpoint = parts[2]
-            status = parts[3]
-            latency = int(parts[4])
+            # The first 13 bytes are YYYY-MM-DDTHH.
+            hour = ts[:13]
 
-            key = hour + "\x00" + endpoint
+            # Bytes are fast hashable dictionary keys.
+            key = (hour, endpoint)
 
             group = groups.get(key)
 
             if group is None:
-                group = [hour, endpoint, [], 0]
+                # [latencies, errors]
+                group = [[], 0]
                 groups[key] = group
 
-            group[2].append(latency)
+            group[0].append(int(latency))
 
-            if status[0] == "5":
-                group[3] += 1
+            # Status is always exactly 3 digits.
+            if status[0] == 53:  # ASCII '5'
+                group[1] += 1
 
-    result = []
+    # Sorting bytes gives exactly the required byte ordering.
+    items = sorted(groups.items())
 
-    for group in groups.values():
-        hour = group[0]
-        endpoint = group[1]
-        values = group[2]
-        errors = group[3]
+    output = []
 
+    for (hour, endpoint), (values, errors) in items:
         values.sort()
 
         count = len(values)
 
-        p50 = values[(count * 50 + 99) // 100 - 1]
-        p95 = values[(count * 95 + 99) // 100 - 1]
-        p99 = values[(count * 99 + 99) // 100 - 1]
+        # Nearest-rank percentiles.
+        p50 = values[(50 * count + 99) // 100 - 1]
+        p95 = values[(95 * count + 99) // 100 - 1]
+        p99 = values[(99 * count + 99) // 100 - 1]
 
         ppm = errors * 1_000_000 // count
 
-        result.append(
-            (
-                hour,
-                f"{hour}:00:00Z {endpoint} {count} "
-                f"{p50} {p95} {p99} {errors} {ppm}\n"
-            )
+        output.append(
+            hour
+            + b":00:00Z "
+            + endpoint
+            + b" "
+            + str(count).encode()
+            + b" "
+            + str(p50).encode()
+            + b" "
+            + str(p95).encode()
+            + b" "
+            + str(p99).encode()
+            + b" "
+            + str(errors).encode()
+            + b" "
+            + str(ppm).encode()
+            + b"\n"
         )
-
-    result.sort()
 
     os.makedirs(out_dir, exist_ok=True)
 
     output_path = os.path.join(out_dir, OUTPUT_NAME)
 
-    with open(
-        output_path,
-        "w",
-        encoding="ascii",
-        newline="\n",
-    ) as f:
-        f.write("".join(line for _, line in result))
+    with open(output_path, "wb", buffering=8 * 1024 * 1024) as f:
+        f.write(b"".join(output))
 
 
 if __name__ == "__main__":
