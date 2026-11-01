@@ -32,8 +32,23 @@ EMPTY: frozenset[int] = frozenset()
 def tokenize(text: bytes) -> list[bytes]:
     return TOKEN_RE.findall(text.lower())
 
+def collect_query_terms(queries: list[bytes]) -> set[bytes]:
+    needed_terms: set[bytes] = set()
 
-def load_corpus(path: str) -> tuple[list[bytes], dict[bytes, set[int]]]:
+    for line in queries:
+        kind, _, rest = line.partition(b" ")
+
+        if kind == b"BOOL":
+            words = rest.split(b" ")
+            needed_terms.update(words[::2])
+
+        elif kind == b"PHRASE":
+            if rest.startswith(b'"') and rest.endswith(b'"'):
+                needed_terms.update(rest[1:-1].split(b" "))
+
+    return needed_terms
+
+def load_corpus(path: str, needed_terms: set[bytes]) -> tuple[list[bytes], dict[bytes, set[int]]]:
     """Read docs.txt. Return the raw texts and the term -> doc id set index."""
     texts: list[bytes] = []
     index: dict[bytes, set[int]] = {}
@@ -46,12 +61,16 @@ def load_corpus(path: str) -> tuple[list[bytes], dict[bytes, set[int]]]:
             if doc_id != len(texts):
                 raise ValueError(f"document ids must be 0..N-1 in order, got {doc_id}")
             texts.append(text)
-            for term in set(tokenize(text)):
-                postings = index.get(term)
-                if postings is None:
-                    index[term] = {doc_id}
-                else:
-                    postings.add(doc_id)
+            seen_terms: set[bytes] = set()
+
+            for match in TOKEN_RE.finditer(text.lower()):
+                term = match.group(0)
+
+                if term not in needed_terms or term in seen_terms:
+                    continue
+
+                seen_terms.add(term)
+                index.setdefault(term, set()).add(doc_id)
     return texts, index
 
 
@@ -72,18 +91,25 @@ def run_bool(index: dict[bytes, set[int]], words: list[bytes]):
 
 
 def run_phrase(index: dict[bytes, set[int]], texts: list[bytes], terms: list[bytes]) -> list[int]:
-    """Documents containing every term, then an exact scan of each one."""
     candidates = index.get(terms[0], EMPTY)
+
     for term in terms[1:]:
         candidates = candidates & index.get(term, EMPTY)
-    k = len(terms)
+        if not candidates:
+            return []
+
+    pattern = re.compile(
+        rb"(?<![a-z0-9])"
+        + rb"[^a-z0-9]+".join(re.escape(term) for term in terms)
+        + rb"(?![a-z0-9])"
+    )
+
     matches = []
+
     for doc_id in candidates:
-        tokens = tokenize(texts[doc_id])
-        for i in range(len(tokens) - k + 1):
-            if tokens[i:i + k] == terms:
-                matches.append(doc_id)
-                break
+        if pattern.search(texts[doc_id].lower()):
+            matches.append(doc_id)
+
     return matches
 
 
@@ -105,15 +131,34 @@ def answer(index, texts, line: bytes) -> str:
 
 
 def main(data_dir: str, out_dir: str) -> None:
-    texts, index = load_corpus(os.path.join(data_dir, DOCS_FILE))
-    results = []
+    queries: list[bytes] = []
+
     with open(os.path.join(data_dir, QUERIES_FILE), "rb") as f:
         for line in f:
             if line.endswith(b"\n"):
                 line = line[:-1]
-            results.append(answer(index, texts, line))
+            queries.append(line)
+
+    needed_terms = collect_query_terms(queries)
+
+    texts, index = load_corpus(
+        os.path.join(data_dir, DOCS_FILE),
+        needed_terms
+    )
+
+    results = [
+        answer(index, texts, line)
+        for line in queries
+    ]
+
     os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(out_dir, RESULTS_FILE), "w", encoding="ascii", newline="\n") as f:
+
+    with open(
+        os.path.join(out_dir, RESULTS_FILE),
+        "w",
+        encoding="ascii",
+        newline="\n"
+    ) as f:
         f.write("".join(r + "\n" for r in results))
 
 
