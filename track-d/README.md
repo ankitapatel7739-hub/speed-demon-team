@@ -1,17 +1,14 @@
 # Track D: Traverse
-
 The task, the input files and the exact output format are in the [spec](https://github.com/hackathon-raptors/speed-demon-2026/blob/main/specs/d-traverse.md).
-
 ## Approach
-
-The program maps `graph.txt` into memory and parses it with several threads, each taking a newline-aligned chunk (a first pass counts lines per chunk so every thread writes straight into its own slice of the edge arrays). From the edge list it builds a forward and a reverse CSR graph with packed 8-byte `{head, weight}` arcs and 32-bit offsets. Because node ids are randomly relabelled, it then renumbers the nodes in BFS order, so the nodes a search touches sit close together in memory and stay in cache.
-
-Each query is answered by bidirectional Dijkstra over the two CSR graphs, using monotone radix heaps instead of binary heaps. The two searches are balanced by how many nodes each has settled, which keeps the work bounded by about twice the cheaper one-directional search even when one side is much denser. Queries with an impossible source or target (no out-edges, no in-edges) are answered in O(1). Distances are 64-bit, and per-thread search state is reset through a touched-node list rather than an O(n) clear. Queries are shared between threads through an atomic counter, and all answers are formatted into a single buffer and written once.
-
+The solution implements an end-to-end parallel traversal pipeline optimized for memory bandwidth and cache locality:
+1. **Parallel Single-Pass Parsing & Atomic Counting**: Instead of multi-pass line scanning, threads map `graph.txt` and parse newline-aligned chunks in parallel using branchless integer parsing. As edges are parsed, outgoing and incoming node degrees are accumulated in lock-free arrays using relaxed atomic increments, avoiding thread-local degree reduction passes.
+2. **Lock-Free Concurrent CSR Construction**: Global forward and backward CSR offset pointers are computed in a single prefix-sum pass. Memory for degree tracking is reused directly for offset tracking, and threads concurrently scatter edges into packed `{to, weight}` arcs using relaxed atomic increments.
+3. **Cache-Locality BFS Renumbering**: Because input node IDs are uniformly scrambled, an unweighted forward BFS traverses the graph once, mapping nodes in discovery order into a compact lookup table (`perm`) and inverse order table (`inv`).
+4. **Parallel CSR Renumbering**: All worker threads renumber the forward and reverse CSR graphs concurrently across contiguous node partitions, keeping related nodes adjacent in memory for cache-hot traversals.
+5. **Bidirectional Dijkstra with Monotone Radix Heaps**: Queries are processed concurrently using thread-local monotone radix heaps ($O(1)$ amortized push/pop). Search frontiers are balanced by settled counts, pruned aggressively against the best-known path distance (`nd >= best`), and reset between queries in $O(\text{touched})$ operations. Impossible sources and targets are checked in $O(1)$.
+6. **Zero-Allocation Output Formatting**: Results are formatted directly into a single pre-allocated string buffer and written in one sequential write.
 ## Dependencies
-
-None.
-
+None (C++17 standard library and POSIX system calls only).
 ## With another 24 hours
-
-Parallelise the BFS renumbering, try a landmark (ALT) lower bound for the long queries, and pack heap keys into a single 64-bit word.
+Explore landmark-based A* (ALT) heuristics for long-distance queries and implement SIMD-accelerated bitmask vectorization for radix heap bucket scanning.
