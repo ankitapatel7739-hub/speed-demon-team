@@ -8,10 +8,11 @@ from array import array
 
 
 def read_input(graph_path, queries_path):
-    # Read graph into compact CSR representation.
+    # ---------- Read graph ----------
     with open(graph_path, "rb", buffering=1024 * 1024) as f:
         n, m = map(int, f.readline().split())
 
+        # Temporary edge storage
         us = array("I")
         vs = array("I")
         ws = array("I")
@@ -29,7 +30,7 @@ def read_input(graph_path, queries_path):
             out_count[u] += 1
             in_count[v] += 1
 
-    # CSR offsets
+    # ---------- Build CSR offsets ----------
     out_start = array("Q", [0]) * (n + 1)
     in_start = array("Q", [0]) * (n + 1)
 
@@ -45,11 +46,10 @@ def read_input(graph_path, queries_path):
         total += in_count[i]
     in_start[n] = total
 
-    # Compact forward graph
+    # ---------- Build forward/reverse CSR ----------
     out_to = array("I", [0]) * m
     out_w = array("I", [0]) * m
 
-    # Compact reverse graph
     in_to = array("I", [0]) * m
     in_w = array("I", [0]) * m
 
@@ -71,31 +71,24 @@ def read_input(graph_path, queries_path):
         in_w[p] = w
         in_pos[v] = p + 1
 
+    # ---------- Read queries ----------
     with open(queries_path, "rb", buffering=1024 * 1024) as f:
         queries = [tuple(map(int, line.split())) for line in f]
 
     return (
         n,
-        out_start,
-        out_to,
-        out_w,
-        in_start,
-        in_to,
-        in_w,
-        queries,
+        out_start, out_to, out_w,
+        in_start, in_to, in_w,
+        queries
     )
 
 
-class BidirectionalDijkstra:
+class Solver:
     def __init__(
         self,
         n,
-        out_start,
-        out_to,
-        out_w,
-        in_start,
-        in_to,
-        in_w,
+        out_start, out_to, out_w,
+        in_start, in_to, in_w
     ):
         self.n = n
 
@@ -107,44 +100,75 @@ class BidirectionalDijkstra:
         self.in_to = in_to
         self.in_w = in_w
 
-        # Reusable per-query arrays.
-        self.dist_f = array("Q", [0]) * n
-        self.dist_b = array("Q", [0]) * n
+        # Reusable arrays
+        self.dist1 = array("Q", [0]) * n
+        self.dist2 = array("Q", [0]) * n
 
-        self.mark_f = array("I", [0]) * n
-        self.mark_b = array("I", [0]) * n
+        self.mark1 = array("I", [0]) * n
+        self.mark2 = array("I", [0]) * n
 
-        self.query_id = 0
+        self.qid = 0
 
-    def shortest_path(self, source, target):
+    def multi_target_dijkstra(self, start, targets, reverse=False):
+        """
+        Run Dijkstra once and stop when all required targets are settled.
+        """
+
+        self.qid += 1
+        qid = self.qid
+
+        dist = self.dist1
+        mark = self.mark1
+
+        if reverse:
+            offsets = self.in_start
+            to = self.in_to
+            weights = self.in_w
+        else:
+            offsets = self.out_start
+            to = self.out_to
+            weights = self.out_w
+
+        remaining = set(targets)
+        results = {}
+
+        dist[start] = 0
+        mark[start] = qid
+
+        heap = [(0, start)]
+        heappush = heapq.heappush
+        heappop = heapq.heappop
+
+        while heap and remaining:
+            d, u = heappop(heap)
+
+            if mark[u] != qid or dist[u] != d:
+                continue
+
+            if u in remaining:
+                results[u] = d
+                remaining.remove(u)
+
+                if not remaining:
+                    break
+
+            begin = offsets[u]
+            end = offsets[u + 1]
+
+            for i in range(begin, end):
+                v = to[i]
+                nd = d + weights[i]
+
+                if mark[v] != qid or nd < dist[v]:
+                    mark[v] = qid
+                    dist[v] = nd
+                    heappush(heap, (nd, v))
+
+        return results
+
+    def bidirectional(self, source, target):
         if source == target:
             return 0
-
-        # Immediate unreachable cases.
-        if self.out_start[source] == self.out_start[source + 1]:
-            return -1
-
-        if self.in_start[target] == self.in_start[target + 1]:
-            return -1
-
-        self.query_id += 1
-        qid = self.query_id
-
-        dist_f = self.dist_f
-        dist_b = self.dist_b
-        mark_f = self.mark_f
-        mark_b = self.mark_b
-
-        heap_f = [(0, source)]
-        heap_b = [(0, target)]
-
-        dist_f[source] = 0
-        mark_f[source] = qid
-
-        dist_b[target] = 0
-        mark_b[target] = qid
-
-        best = None
 
         out_start = self.out_start
         out_to = self.out_to
@@ -154,21 +178,50 @@ class BidirectionalDijkstra:
         in_to = self.in_to
         in_w = self.in_w
 
+        # Quick impossible cases
+        if out_start[source] == out_start[source + 1]:
+            return -1
+
+        if in_start[target] == in_start[target + 1]:
+            return -1
+
+        self.qid += 1
+        qid = self.qid
+
+        dist_f = self.dist1
+        dist_b = self.dist2
+
+        mark_f = self.mark1
+        mark_b = self.mark2
+
+        dist_f[source] = 0
+        mark_f[source] = qid
+
+        dist_b[target] = 0
+        mark_b[target] = qid
+
+        heap_f = [(0, source)]
+        heap_b = [(0, target)]
+
+        push = heapq.heappush
+        pop = heapq.heappop
+
+        best = -1
+
         while heap_f and heap_b:
 
-            # Remove stale forward heap entries.
+            # Remove stale entries
             while heap_f:
                 d, u = heap_f[0]
                 if mark_f[u] == qid and dist_f[u] == d:
                     break
-                heapq.heappop(heap_f)
+                pop(heap_f)
 
-            # Remove stale backward heap entries.
             while heap_b:
                 d, u = heap_b[0]
                 if mark_b[u] == qid and dist_b[u] == d:
                     break
-                heapq.heappop(heap_b)
+                pop(heap_b)
 
             if not heap_f or not heap_b:
                 break
@@ -176,115 +229,176 @@ class BidirectionalDijkstra:
             min_f = heap_f[0][0]
             min_b = heap_b[0][0]
 
-            # No better path can be found.
-            if best is not None and min_f + min_b >= best:
+            if best >= 0 and min_f + min_b >= best:
                 break
 
-            # Expand the smaller frontier.
+            # Expand smaller frontier
             if min_f <= min_b:
-                d, u = heapq.heappop(heap_f)
 
-                # If backward search has reached u.
+                d, u = pop(heap_f)
+
                 if mark_b[u] == qid:
                     candidate = d + dist_b[u]
-                    if best is None or candidate < best:
+                    if best < 0 or candidate < best:
                         best = candidate
 
-                start = out_start[u]
+                begin = out_start[u]
                 end = out_start[u + 1]
 
-                for i in range(start, end):
+                for i in range(begin, end):
                     v = out_to[i]
                     nd = d + out_w[i]
 
                     if mark_f[v] != qid or nd < dist_f[v]:
-                        dist_f[v] = nd
                         mark_f[v] = qid
-                        heapq.heappush(heap_f, (nd, v))
+                        dist_f[v] = nd
+                        push(heap_f, (nd, v))
 
                         if mark_b[v] == qid:
                             candidate = nd + dist_b[v]
-                            if best is None or candidate < best:
+                            if best < 0 or candidate < best:
                                 best = candidate
 
             else:
-                d, u = heapq.heappop(heap_b)
 
-                # If forward search has reached u.
+                d, u = pop(heap_b)
+
                 if mark_f[u] == qid:
                     candidate = d + dist_f[u]
-                    if best is None or candidate < best:
+                    if best < 0 or candidate < best:
                         best = candidate
 
-                start = in_start[u]
+                begin = in_start[u]
                 end = in_start[u + 1]
 
-                for i in range(start, end):
+                for i in range(begin, end):
                     v = in_to[i]
                     nd = d + in_w[i]
 
                     if mark_b[v] != qid or nd < dist_b[v]:
-                        dist_b[v] = nd
                         mark_b[v] = qid
-                        heapq.heappush(heap_b, (nd, v))
+                        dist_b[v] = nd
+                        push(heap_b, (nd, v))
 
                         if mark_f[v] == qid:
                             candidate = nd + dist_f[v]
-                            if best is None or candidate < best:
+                            if best < 0 or candidate < best:
                                 best = candidate
 
-        return -1 if best is None else best
+        return best
 
 
 def main(data_dir="/data", out_dir="/out"):
+
     graph_path = os.path.join(data_dir, "graph.txt")
     queries_path = os.path.join(data_dir, "queries.txt")
 
     (
         n,
-        out_start,
-        out_to,
-        out_w,
-        in_start,
-        in_to,
-        in_w,
-        queries,
+        out_start, out_to, out_w,
+        in_start, in_to, in_w,
+        queries
     ) = read_input(graph_path, queries_path)
 
-    solver = BidirectionalDijkstra(
+    solver = Solver(
         n,
-        out_start,
-        out_to,
-        out_w,
-        in_start,
-        in_to,
-        in_w,
+        out_start, out_to, out_w,
+        in_start, in_to, in_w
     )
 
     answers = [-1] * len(queries)
 
-    # Solve duplicate queries only once.
-    unique = {}
+    # Group by source and target
+    by_source = {}
+    by_target = {}
 
-    for index, query in enumerate(queries):
-        if query in unique:
-            unique[query].append(index)
+    # Also remove exact duplicate queries
+    unique_queries = {}
+
+    for index, (s, t) in enumerate(queries):
+        key = (s, t)
+
+        if key in unique_queries:
+            unique_queries[key].append(index)
         else:
-            unique[query] = [index]
+            unique_queries[key] = [index]
 
-    for (source, target), indexes in unique.items():
-        answer = solver.shortest_path(source, target)
+    unique_items = list(unique_queries.items())
+
+    for item_index, ((s, t), _) in enumerate(unique_items):
+        by_source.setdefault(s, []).append(item_index)
+        by_target.setdefault(t, []).append(item_index)
+
+    unique_answers = [-1] * len(unique_items)
+
+    # Choose grouping only when it meaningfully reduces searches.
+    unique_count = len(unique_items)
+    source_count = len(by_source)
+    target_count = len(by_target)
+
+    if source_count < unique_count // 2:
+
+        # Many queries share sources
+        for source, item_ids in by_source.items():
+
+            targets = [
+                unique_items[i][0][1]
+                for i in item_ids
+            ]
+
+            result = solver.multi_target_dijkstra(
+                source,
+                targets,
+                reverse=False
+            )
+
+            for i in item_ids:
+                target = unique_items[i][0][1]
+                unique_answers[i] = result.get(target, -1)
+
+    elif target_count < unique_count // 2:
+
+        # Many queries share targets: reverse graph
+        for target, item_ids in by_target.items():
+
+            sources = [
+                unique_items[i][0][0]
+                for i in item_ids
+            ]
+
+            result = solver.multi_target_dijkstra(
+                target,
+                sources,
+                reverse=True
+            )
+
+            for i in item_ids:
+                source = unique_items[i][0][0]
+                unique_answers[i] = result.get(source, -1)
+
+    else:
+
+        # Mostly unique queries: bidirectional Dijkstra
+        for i, ((source, target), _) in enumerate(unique_items):
+            unique_answers[i] = solver.bidirectional(source, target)
+
+    # Expand duplicate queries
+    for i, (_, indexes) in enumerate(unique_items):
+        answer = unique_answers[i]
 
         for index in indexes:
             answers[index] = answer
 
     os.makedirs(out_dir, exist_ok=True)
 
+    output_path = os.path.join(out_dir, "distances.txt")
+
     with open(
-        os.path.join(out_dir, "distances.txt"),
+        output_path,
         "w",
         encoding="ascii",
         newline="\n",
+        buffering=1024 * 1024
     ) as f:
         f.write("\n".join(map(str, answers)))
         if answers:
@@ -293,8 +407,10 @@ def main(data_dir="/data", out_dir="/out"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+
     parser.add_argument("--data", default="/data")
     parser.add_argument("--out", default="/out")
 
     args = parser.parse_args()
+
     main(args.data, args.out)
