@@ -44,7 +44,7 @@ int main(int argc, char* argv[]) {
     string timestamp;
     string method;
     string endpoint;
-    int status;
+    string status;
     int latency;
 
     while (input >> timestamp >> method >> endpoint >> status >> latency) {
@@ -59,7 +59,7 @@ int main(int argc, char* argv[]) {
 
         stats.latencies.push_back(latency);
 
-        if (status >= 500 && status < 600) {
+        if (!status.empty() && status[0] == '5') {
             stats.errors++;
         }
     }
