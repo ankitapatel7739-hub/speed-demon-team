@@ -12,6 +12,7 @@ struct FastInput {
 impl FastInput {
     fn new(path: &str) -> Self {
         let mut data = Vec::new();
+
         BufReader::new(File::open(path).unwrap())
             .read_to_end(&mut data)
             .unwrap();
@@ -19,7 +20,7 @@ impl FastInput {
         Self { data, pos: 0 }
     }
 
-    #[inline]
+    #[inline(always)]
     fn next_usize(&mut self) -> usize {
         while self.pos < self.data.len()
             && (self.data[self.pos] < b'0' || self.data[self.pos] > b'9')
@@ -133,6 +134,10 @@ struct Solver {
     mark_b: Vec<u32>,
 
     query_id: u32,
+
+    // Reused between queries
+    heap_f: BinaryHeap<Reverse<(u64, usize)>>,
+    heap_b: BinaryHeap<Reverse<(u64, usize)>>,
 }
 
 impl Solver {
@@ -141,11 +146,17 @@ impl Solver {
 
         Self {
             graph,
+
             dist_f: vec![0; n],
             dist_b: vec![0; n],
+
             mark_f: vec![0; n],
             mark_b: vec![0; n],
+
             query_id: 0,
+
+            heap_f: BinaryHeap::new(),
+            heap_b: BinaryHeap::new(),
         }
     }
 
@@ -163,50 +174,62 @@ impl Solver {
             return -1;
         }
 
-        self.query_id += 1;
+        self.query_id = self.query_id.wrapping_add(1);
+
+        // Extremely unlikely, but prevents marker collision
+        if self.query_id == 0 {
+            self.mark_f.fill(0);
+            self.mark_b.fill(0);
+            self.query_id = 1;
+        }
+
         let qid = self.query_id;
 
-        let mut heap_f: BinaryHeap<Reverse<(u64, usize)>> = BinaryHeap::new();
-        let mut heap_b: BinaryHeap<Reverse<(u64, usize)>> = BinaryHeap::new();
+        // IMPORTANT: reuse allocated memory
+        self.heap_f.clear();
+        self.heap_b.clear();
 
         self.dist_f[source] = 0;
         self.mark_f[source] = qid;
-        heap_f.push(Reverse((0, source)));
+        self.heap_f.push(Reverse((0, source)));
 
         self.dist_b[target] = 0;
         self.mark_b[target] = qid;
-        heap_b.push(Reverse((0, target)));
+        self.heap_b.push(Reverse((0, target)));
 
         let mut best = u64::MAX;
 
         loop {
-            while let Some(&Reverse((d, u))) = heap_f.peek() {
+            // Remove stale forward entries
+            while let Some(&Reverse((d, u))) = self.heap_f.peek() {
                 if self.mark_f[u] == qid && self.dist_f[u] == d {
                     break;
                 }
-                heap_f.pop();
+                self.heap_f.pop();
             }
 
-            while let Some(&Reverse((d, u))) = heap_b.peek() {
+            // Remove stale backward entries
+            while let Some(&Reverse((d, u))) = self.heap_b.peek() {
                 if self.mark_b[u] == qid && self.dist_b[u] == d {
                     break;
                 }
-                heap_b.pop();
+                self.heap_b.pop();
             }
 
-            if heap_f.is_empty() || heap_b.is_empty() {
+            if self.heap_f.is_empty() || self.heap_b.is_empty() {
                 break;
             }
 
-            let min_f = heap_f.peek().unwrap().0.0;
-            let min_b = heap_b.peek().unwrap().0.0;
+            let min_f = self.heap_f.peek().unwrap().0.0;
+            let min_b = self.heap_b.peek().unwrap().0.0;
 
+            // No better path can be found
             if min_f.saturating_add(min_b) >= best {
                 break;
             }
 
             if min_f <= min_b {
-                let Reverse((d, u)) = heap_f.pop().unwrap();
+                let Reverse((d, u)) = self.heap_f.pop().unwrap();
 
                 if self.mark_b[u] == qid {
                     best = best.min(d + self.dist_b[u]);
@@ -222,15 +245,20 @@ impl Solver {
                     if self.mark_f[v] != qid || nd < self.dist_f[v] {
                         self.dist_f[v] = nd;
                         self.mark_f[v] = qid;
-                        heap_f.push(Reverse((nd, v)));
+
+                        self.heap_f.push(Reverse((nd, v)));
 
                         if self.mark_b[v] == qid {
-                            best = best.min(nd + self.dist_b[v]);
+                            let candidate = nd + self.dist_b[v];
+
+                            if candidate < best {
+                                best = candidate;
+                            }
                         }
                     }
                 }
             } else {
-                let Reverse((d, u)) = heap_b.pop().unwrap();
+                let Reverse((d, u)) = self.heap_b.pop().unwrap();
 
                 if self.mark_f[u] == qid {
                     best = best.min(d + self.dist_f[u]);
@@ -246,10 +274,15 @@ impl Solver {
                     if self.mark_b[v] != qid || nd < self.dist_b[v] {
                         self.dist_b[v] = nd;
                         self.mark_b[v] = qid;
-                        heap_b.push(Reverse((nd, v)));
+
+                        self.heap_b.push(Reverse((nd, v)));
 
                         if self.mark_f[v] == qid {
-                            best = best.min(nd + self.dist_f[v]);
+                            let candidate = nd + self.dist_f[v];
+
+                            if candidate < best {
+                                best = candidate;
+                            }
                         }
                     }
                 }
@@ -274,18 +307,16 @@ fn main() {
 
     while i < args.len() {
         match args[i].as_str() {
-            "--data" => {
-                if i + 1 < args.len() {
-                    data_dir = args[i + 1].clone();
-                    i += 1;
-                }
+            "--data" if i + 1 < args.len() => {
+                data_dir = args[i + 1].clone();
+                i += 1;
             }
-            "--out" => {
-                if i + 1 < args.len() {
-                    out_dir = args[i + 1].clone();
-                    i += 1;
-                }
+
+            "--out" if i + 1 < args.len() => {
+                out_dir = args[i + 1].clone();
+                i += 1;
             }
+
             _ => {}
         }
 
@@ -300,7 +331,7 @@ fn main() {
 
     let mut queries_input = FastInput::new(&queries_path);
 
-    let mut queries: Vec<(usize, usize)> = Vec::new();
+    let mut queries = Vec::new();
 
     while queries_input.pos < queries_input.data.len() {
         while queries_input.pos < queries_input.data.len()
@@ -315,6 +346,13 @@ fn main() {
         }
 
         let source = queries_input.next_usize();
+
+        while queries_input.pos < queries_input.data.len()
+            && (queries_input.data[queries_input.pos] < b'0'
+                || queries_input.data[queries_input.pos] > b'9')
+        {
+            queries_input.pos += 1;
+        }
 
         if queries_input.pos >= queries_input.data.len() {
             break;
@@ -339,6 +377,6 @@ fn main() {
     let mut writer = BufWriter::with_capacity(1024 * 1024, file);
 
     for answer in answers {
-        writeln!(writer, "{}", answer).unwrap();
+        writeln!(writer, "{answer}").unwrap();
     }
 }
