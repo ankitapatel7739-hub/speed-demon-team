@@ -1,9 +1,11 @@
-// Speed Demon 2026, Track C (Join): C++ implementation.
+// Speed Demon 2026, Track C (Join): C++ implementation (v3, hash-only distinct count).
 //
-// Memory-maps records.csv, splits it at record boundaries, parses each part on
-// its own thread with a hand-written byte parser (no regex, no copies) and
-// aggregates per country into dense arrays. Distinct names are counted
-// exactly: 64-bit hash for sorting, byte comparison to confirm equality.
+// Changes vs v1:
+//  * no MAP_POPULATE: each thread faults/reads ahead its own slice in parallel
+//  * distinct names are de-duplicated on insert with an open-addressing hash set
+//    (64-bit hash + byte comparison, so still exact) instead of pushing every
+//    record and sorting O(n log n)
+//  * merge = insert the smaller sets into the largest one, no re-sort
 //
 // Build: g++ -O3 -std=c++17 -pthread -o c_join c_join.cpp
 // Run:   ./c_join --data /data --out /out
@@ -40,12 +42,6 @@ struct NameRec {
     uint32_t len;
 };
 
-struct Acc {
-    uint64_t count = 0, id_sum = 0, name_bytes = 0, note_bytes = 0;
-    int64_t sum = 0, mn = INT64_MAX, mx = INT64_MIN;
-    std::vector<NameRec> names;
-};
-
 static inline uint64_t hash_bytes(const char* p, size_t n) {
     uint64_t h = 0x9E3779B97F4A7C15ULL ^ (uint64_t)n;
     while (n >= 8) {
@@ -59,9 +55,50 @@ static inline uint64_t hash_bytes(const char* p, size_t n) {
     uint64_t v = 0;
     memcpy(&v, p, n);
     h = (h ^ v) * 0xC4CEB9FE1A85EC53ULL;
-    h ^= h >> 29;
+    h ^= h >> 33; h *= 0xFF51AFD7ED558CCDULL; h ^= h >> 33;
     return h;
 }
+
+// Set of 64-bit name hashes (open addressing, 0 = empty). No file access on insert.
+struct HSet {
+    std::vector<uint64_t> t;
+    size_t n = 0;
+    void init(size_t cap) { t.assign(cap, 0); }
+    void grow() {
+        std::vector<uint64_t> old;
+        old.swap(t);
+        init(old.size() * 2);
+        size_t mask = t.size() - 1;
+        for (uint64_t h : old) {
+            if (!h) continue;
+            size_t i = (size_t)(h ^ (h >> 32)) & mask;
+            while (t[i]) i = (i + 1) & mask;
+            t[i] = h;
+        }
+    }
+    inline void insert(uint64_t h) {
+        if (!h) h = 1;
+        if (t.empty()) init(64);
+        size_t mask = t.size() - 1;
+        size_t i = (size_t)(h ^ (h >> 32)) & mask;
+        for (;;) {
+            uint64_t s = t[i];
+            if (!s) {
+                t[i] = h;
+                if (++n * 2 > t.size()) grow();
+                return;
+            }
+            if (s == h) return;
+            i = (i + 1) & mask;
+        }
+    }
+};
+
+struct Acc {
+    uint64_t count = 0, id_sum = 0, name_bytes = 0, note_bytes = 0;
+    int64_t sum = 0, mn = INT64_MAX, mx = INT64_MIN;
+    HSet names;
+};
 
 // ---------------------------------------------------------------- regions
 
@@ -206,6 +243,11 @@ static inline bool parse_text(const char* b, size_t fend, size_t& pos, Text& t) 
 
 static void run_chunk(const char* b, size_t pos, size_t end, size_t fend,
                       const Lookup& lk, std::vector<Acc>& accs) {
+    // read ahead our own slice (page-aligned) so faults overlap across threads
+    {
+        size_t a = pos & ~(size_t)4095;
+        if (end > a) madvise((void*)(b + a), end - a, MADV_WILLNEED);
+    }
     while (pos < end) {
         // id
         size_t s = pos;
@@ -279,8 +321,7 @@ static void run_chunk(const char* b, size_t pos, size_t end, size_t fend,
         if (cents > a.mx) a.mx = cents;
         a.name_bytes += name.value_len;
         a.note_bytes += note.value_len;
-        a.names.push_back({hash_bytes(b + name.start, name.len), (uint32_t)name.start,
-                           (uint32_t)name.len});
+        a.names.insert(hash_bytes(b + name.start, name.len));
     }
 }
 
@@ -347,9 +388,8 @@ int main(int argc, char** argv) {
     const char* base = nullptr;
 
     if (fsize > 0) {
-        void* m = mmap(nullptr, fsize, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
+        void* m = mmap(nullptr, fsize, PROT_READ, MAP_PRIVATE, fd, 0);
         if (m == MAP_FAILED) die("mmap failed");
-        madvise(m, fsize, MADV_SEQUENTIAL);
         base = (const char*)m;
 
         // header
@@ -379,24 +419,8 @@ int main(int argc, char** argv) {
         std::vector<std::vector<Acc>> per(parts, std::vector<Acc>(K));
         std::vector<std::thread> th;
 
-        auto cmp_less = [base](const NameRec& a, const NameRec& b) {
-            if (a.h != b.h) return a.h < b.h;
-            if (a.len != b.len) return a.len < b.len;
-            return memcmp(base + a.off, base + b.off, a.len) < 0;
-        };
-        auto cmp_eq = [base](const NameRec& a, const NameRec& b) {
-            return a.h == b.h && a.len == b.len && memcmp(base + a.off, base + b.off, a.len) == 0;
-        };
-
         for (size_t i = 0; i < parts; i++) {
-            th.emplace_back([&, i]() {
-                run_chunk(base, cuts[i], cuts[i + 1], fsize, lk, per[i]);
-                for (Acc& a : per[i]) {  // exact local de-duplication, in parallel
-                    std::sort(a.names.begin(), a.names.end(), cmp_less);
-                    a.names.erase(std::unique(a.names.begin(), a.names.end(), cmp_eq),
-                                  a.names.end());
-                }
-            });
+            th.emplace_back([&, i]() { run_chunk(base, cuts[i], cuts[i + 1], fsize, lk, per[i]); });
         }
         for (auto& t : th) t.join();
 
@@ -423,15 +447,17 @@ int main(int argc, char** argv) {
                 for (;;) {
                     size_t k = next.fetch_add(1);
                     if (k >= K) break;
-                    std::vector<NameRec> all;
+                    size_t big = 0;
+                    for (size_t i = 1; i < parts; i++)
+                        if (per[i][k].names.n > per[big][k].names.n) big = i;
+                    HSet& dst = per[big][k].names;
                     for (size_t i = 0; i < parts; i++) {
-                        auto& v = per[i][k].names;
-                        all.insert(all.end(), v.begin(), v.end());
-                        std::vector<NameRec>().swap(v);
+                        if (i == big) continue;
+                        for (uint64_t h : per[i][k].names.t)
+                            if (h) dst.insert(h);
+                        std::vector<uint64_t>().swap(per[i][k].names.t);
                     }
-                    std::sort(all.begin(), all.end(), cmp_less);
-                    size_t n = (size_t)(std::unique(all.begin(), all.end(), cmp_eq) - all.begin());
-                    distinct[k] = n;
+                    distinct[k] = dst.n;
                 }
             });
         }
@@ -463,7 +489,7 @@ int main(int argc, char** argv) {
         if (!f) die("cannot write aggregates.txt");
         fwrite(out.data(), 1, out.size(), f);
         fclose(f);
-        return 0;
+        _exit(0);  // skip unmapping / freeing big structures
     }
 
     // empty records.csv: empty output
